@@ -111,6 +111,17 @@ configuration_impl::configuration_impl(const std::string &_path)
     netmask_ = netmask_.from_string(VSOMEIP_NETMASK);
     for (auto i = 0; i < ET_MAX; i++)
         is_configured_[i] = false;
+
+#ifdef _WIN32
+#if VSOMEIP_BOOST_VERSION < 106600
+    routing_.host_.unicast_ = boost::asio::ip::address::from_string("127.0.0.1");
+#else
+    routing_.host_.unicast_ = boost::asio::ip::make_address("127.0.0.1");
+#endif
+    routing_.host_.port_ = 31490;
+    routing_.guests_.unicast_ = routing_.host_.unicast_;
+    routing_.guests_.ports_[{ ANY_UID, ANY_GID }].emplace(31492, 31999);
+#endif
 }
 
 configuration_impl::configuration_impl(const configuration_impl &_other)
@@ -1997,7 +2008,6 @@ void configuration_impl::load_service(
     try {
         bool is_loaded(true);
         bool use_magic_cookies(false);
-        bool is_dynamic_service(false);
 
         std::shared_ptr<service> its_service(std::make_shared<service>());
         its_service->reliable_ = its_service->unreliable_ = ILLEGAL_PORT;
@@ -2005,10 +2015,6 @@ void configuration_impl::load_service(
         its_service->multicast_address_ = "";
         its_service->multicast_port_ = ILLEGAL_PORT;
         its_service->protocol_ = "someip";
-
-        // store until full service parsed
-        std::pair<uint16_t,uint16_t> its_reliable_port_range;
-        std::pair<uint16_t,uint16_t> its_unreliable_port_range;
 
         for (auto i = _tree.begin(); i != _tree.end(); ++i) {
             std::string its_key(i->first);
@@ -2026,7 +2032,7 @@ void configuration_impl::load_service(
                     its_converter << its_value;
                     its_converter >> its_service->reliable_;
                 }
-                if (!its_service->reliable_) {
+                if(!its_service->reliable_) {
                     its_service->reliable_ = ILLEGAL_PORT;
                 }
                 try {
@@ -2036,12 +2042,6 @@ void configuration_impl::load_service(
                 } catch (...) {
 
                 }
-            } else if (its_key == "dynamic_instance"){
-                is_dynamic_service = ("true" == its_value);
-            } else if (its_key == "dynamic_instance_unreliable"){
-                its_unreliable_port_range = load_client_port_range(i->second);
-            } else if (its_key == "dynamic_instance_reliable"){
-                its_reliable_port_range = load_client_port_range(i->second);
             } else if (its_key == "unreliable") {
                 its_converter << its_value;
                 its_converter >> its_service->unreliable_;
@@ -2082,86 +2082,62 @@ void configuration_impl::load_service(
                 }
             }
         }
-        if (is_dynamic_service){
-            std::lock_guard<std::mutex> its_lock(dynamic_services_mutex_);
-            auto found_service = dynamic_service_templates_.find(its_service->service_);
-            if (found_service != dynamic_service_templates_.end()) {
-                VSOMEIP_WARNING << "Multiple configurations for dynamic service ["
-                                << std::hex << its_service->service_ << "]";
+
+        auto found_service = services_.find(its_service->service_);
+        if (found_service != services_.end()) {
+            auto found_instance = found_service->second.find(
+                    its_service->instance_);
+            if (found_instance != found_service->second.end()) {
+                VSOMEIP_WARNING << "Multiple configurations for service ["
+                        << std::hex << its_service->service_ << "."
+                        << its_service->instance_ << "]";
                 is_loaded = false;
             }
-
-            if(is_loaded) {
-                dynamic_service_templates_.insert({its_service->service_, its_service});
-            }
-
-            reliable_ports_range_for_dynamic_services_[its_service->service_] = its_reliable_port_range;
-            used_reliable_ports_for_dynamic_services_.insert({its_service->service_, std::set<uint16_t>()});
-            unreliable_ports_range_for_dynamic_services_[its_service->service_] = its_unreliable_port_range;
-            used_unreliable_ports_for_dynamic_services_.insert({its_service->service_, std::set<uint16_t>()});
         }
-        else {
-            auto found_service = services_.find(its_service->service_);
-            if (found_service != services_.end()) {
-                auto found_instance = found_service->second.find(
-                        its_service->instance_);
-                if (found_instance != found_service->second.end()) {
-                    VSOMEIP_WARNING << "Multiple configurations for service ["
-                            << std::hex << its_service->service_ << "."
-                            << its_service->instance_ << "]";
-                    is_loaded = false;
-                }
+
+        if (is_loaded) {
+            services_[its_service->service_][its_service->instance_] =
+                    its_service;
+            if (use_magic_cookies) {
+                magic_cookies_[its_service->unicast_address_].insert(its_service->reliable_);
             }
 
-            if (is_loaded) {
-                add_service_to_maps(its_service, use_magic_cookies);
+            if (its_service->unicast_address_ == default_unicast_) {
+                // local services
+                if(its_service->reliable_ != ILLEGAL_PORT) {
+                    services_by_ip_port_[unicast_.to_string()]
+                                        [its_service->reliable_]
+                                        [its_service->service_] = its_service;
+                }
+                if (its_service->unreliable_ != ILLEGAL_PORT) {
+                    services_by_ip_port_[unicast_.to_string()]
+                                        [its_service->unreliable_]
+                                        [its_service->service_] = its_service;
+                    // This is necessary as all udp server endpoints listen on
+                    // INADDR_ANY instead of a specific address
+                    services_by_ip_port_[boost::asio::ip::address_v4::any().to_string()]
+                                        [its_service->unreliable_]
+                                        [its_service->service_] = its_service;
+                    services_by_ip_port_[boost::asio::ip::address_v6::any().to_string()]
+                                        [its_service->unreliable_]
+                                        [its_service->service_] = its_service;
+                }
+            } else {
+                // remote services
+                if (its_service->reliable_ != ILLEGAL_PORT) {
+                    services_by_ip_port_[its_service->unicast_address_]
+                                        [its_service->reliable_]
+                                        [its_service->service_] = its_service;
+                }
+                if (its_service->unreliable_ != ILLEGAL_PORT) {
+                    services_by_ip_port_[its_service->unicast_address_]
+                                        [its_service->unreliable_]
+                                        [its_service->service_] = its_service;
+                }
             }
         }
     } catch (...) {
         // Intentionally left empty
-    }
-}
-
-void configuration_impl::add_service_to_maps(std::shared_ptr<service> its_service, bool use_magic_cookies){
-    VSOMEIP_INFO << "insert service: " << its_service->service_ << ":" << its_service->instance_;
-    services_[its_service->service_][its_service->instance_] =
-        its_service;
-    if (use_magic_cookies) {
-      magic_cookies_[its_service->unicast_address_].insert(its_service->reliable_);
-    }
-
-    if (its_service->unicast_address_ == default_unicast_) {
-      // local services
-      if(its_service->reliable_ != ILLEGAL_PORT) {
-        services_by_ip_port_[unicast_.to_string()]
-        [its_service->reliable_]
-        [its_service->service_] = its_service;
-      }
-      if (its_service->unreliable_ != ILLEGAL_PORT) {
-        services_by_ip_port_[unicast_.to_string()]
-        [its_service->unreliable_]
-        [its_service->service_] = its_service;
-        // This is necessary as all udp server endpoints listen on
-        // INADDR_ANY instead of a specific address
-        services_by_ip_port_[boost::asio::ip::address_v4::any().to_string()]
-        [its_service->unreliable_]
-        [its_service->service_] = its_service;
-        services_by_ip_port_[boost::asio::ip::address_v6::any().to_string()]
-        [its_service->unreliable_]
-        [its_service->service_] = its_service;
-      }
-    } else {
-      // remote services
-      if (its_service->reliable_ != ILLEGAL_PORT) {
-        services_by_ip_port_[its_service->unicast_address_]
-        [its_service->reliable_]
-        [its_service->service_] = its_service;
-      }
-      if (its_service->unreliable_ != ILLEGAL_PORT) {
-        services_by_ip_port_[its_service->unicast_address_]
-        [its_service->unreliable_]
-        [its_service->service_] = its_service;
-      }
     }
 }
 
@@ -4118,6 +4094,8 @@ configuration_impl::load_event_debounce(
                its_converter << std::dec << its_value;
                its_converter >> its_debounce->interval_;
            }
+        } else if (its_key == "send_current_value_after") {
+            its_debounce->send_current_value_after_ = (its_value == "true");
         }
     }
 
@@ -5061,143 +5039,5 @@ configuration_impl::is_remote_access_allowed() const {
     return is_remote_access_allowed_;
 }
 
-bool configuration_impl::service_has_valid_dynamic_settings(service_t _service,
-    std::map<service_t, std::pair<std::uint16_t, std::uint16_t>>& _settings) const {
-
-    bool result = false;
-
-    // check whether the service is found in the settings and its ports range is valid
-    if (_settings.find(_service) != _settings.end()) {
-        const auto port_range = _settings[_service];
-        if ((port_range.first != 0) && (port_range.second != 0)) {
-            result = true;
-        }
-    }
-
-    return result;
-}
-
-bool configuration_impl::add_service_instance(service_t _service, instance_t _instance) {
-    // find template service
-    auto found_service = dynamic_service_templates_.find(_service);
-    if (found_service != dynamic_service_templates_.end()) {
-        auto template_service = found_service->second;
-
-        // create copy
-        std::shared_ptr<service> new_service = std::make_shared<service>(*template_service);
-        new_service->instance_ = _instance;
-
-        uint16_t its_port = 0;
-
-        // note that the "unreliable" port settings will not be generated by the franca generator
-        // in case of dynamic service instances. Thus we need to check whether the dynamic port range
-        // is set and valid to determine if unreliable dynamic service instances is needed at all
-        const bool has_unreliable_dynamic_settings = service_has_valid_dynamic_settings(_service,
-            unreliable_ports_range_for_dynamic_services_);
-
-        // verify if the "unreliable" port settings is explicitly set, i.e., static service instance
-        // needs to be used
-        const bool has_unreliable_static_settings = (template_service->unreliable_ != ILLEGAL_PORT);
-
-        // claim UDP port if unreliable port is configured either statically or dynamically
-        if (has_unreliable_static_settings || has_unreliable_dynamic_settings) {
-            its_port = claim_port_unreliable(_service);
-            if (its_port == 0){
-                VSOMEIP_ERROR << __func__ << " - could not claim unreliable port";
-                return false;
-            }
-            new_service->unreliable_ = its_port;
-            new_service->multicast_port_ = its_port;
-        }
-
-        // do similar as above to determine whether reliable static/dynamic service instances is needed
-        const bool has_reliable_dynamic_settings = service_has_valid_dynamic_settings(_service,
-            reliable_ports_range_for_dynamic_services_);
-
-        const bool has_reliable_static_settings = (template_service->reliable_ != ILLEGAL_PORT);
-
-        if (has_reliable_static_settings || has_reliable_dynamic_settings) {
-            its_port = claim_port_reliable(_service);
-            if (its_port == 0){
-                VSOMEIP_ERROR << __func__ << " - could not claim reliable port";
-                return false;
-            }
-            new_service->reliable_ = its_port;
-            new_service->multicast_port_ = its_port;
-        }
-
-        // TODO how to handle magic cookies?
-        add_service_to_maps(new_service, false);
-    }
-    else {
-        VSOMEIP_ERROR << __func__ << " - no template service found for ["
-        << std::hex << _service << "]";
-        return false;
-    }
-    return true;
-}
-
-bool configuration_impl::is_registered_service(service_t _service, instance_t _instance) {
-    auto its_service = find_service(_service, _instance);
-    if(its_service){
-        return true;
-    }
-    return false;
-}
-
-uint16_t configuration_impl::claim_port_unreliable(service_t _service) {
-    return claim_port(_service, false);
-}
-
-uint16_t configuration_impl::claim_port_reliable(service_t _service) {
-    return claim_port(_service, true);
-}
-
-uint16_t configuration_impl::claim_port(service_t _service, bool _reliable){
-    uint16_t its_available_port = 0;
-    std::lock_guard<std::mutex> its_lock(dynamic_services_mutex_);
-
-    std::map<service_t, std::set<std::uint16_t>> *service_port_map;
-    std::pair<uint16_t, uint16_t> port_range;
-    if(_reliable){
-        service_port_map = &used_reliable_ports_for_dynamic_services_;
-        port_range = reliable_ports_range_for_dynamic_services_[_service];
-    } else {
-        service_port_map = &used_unreliable_ports_for_dynamic_services_;
-        port_range = unreliable_ports_range_for_dynamic_services_[_service];
-    }
-
-    auto iter_used_ports = service_port_map->find(_service);
-    if (iter_used_ports != service_port_map->end()){
-        auto used_ports = iter_used_ports->second;
-        // find available port
-        for (auto i = port_range.first; i <= port_range.second; i++){
-            if (used_ports.find(i) == used_ports.end()){
-                its_available_port = i;
-                break;
-            }
-        }
-
-        // claim port
-        if(its_available_port != 0){
-            service_port_map->find(_service)->second.insert(its_available_port);
-            VSOMEIP_INFO << __func__ << " - claimed dynamic instance port (reliable:"<<_reliable<<") "
-                << its_available_port << " for service "
-                << std::hex << std::setw(4) << std::setfill('0') << _service;
-        } else {
-            VSOMEIP_ERROR << __func__ << " - claim dynamic instance port (reliable:"<<_reliable<<") failed "
-                << "for service " << std::hex << std::setw(4) << std::setfill('0') << _service
-                << " - no free ports found in range " << port_range.first << " - " << port_range.second;
-        }
-    }else{
-       VSOMEIP_WARNING << __func__ << " - no dynamic instance ports for service "
-           << std::hex << std::setw(4) << std::setfill('0') << _service
-           << "(reliable: " << _reliable << ") found";
-    }
-
-    return its_available_port;
-
-}
-
-}  // namespace config
+}  // namespace cfg
 }  // namespace vsomeip_v3

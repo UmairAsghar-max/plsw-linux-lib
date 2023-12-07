@@ -21,11 +21,11 @@
 #include "../include/tp.hpp"
 #include "../include/udp_server_endpoint_impl.hpp"
 #include "../include/udp_server_endpoint_impl_receive_op.hpp"
-#include "../../routing/include/routing_host.hpp"
 #include "../../configuration/include/configuration.hpp"
+#include "../../routing/include/routing_host.hpp"
+#include "../../service_discovery/include/defines.hpp"
 #include "../../utility/include/byteorder.hpp"
 #include "../../utility/include/utility.hpp"
-#include "../../service_discovery/include/defines.hpp"
 
 namespace ip = boost::asio::ip;
 
@@ -240,8 +240,8 @@ void udp_server_endpoint_impl::receive_multicast(uint8_t _multicast_id) {
 
     if (_multicast_id == multicast_id_ && multicast_socket_ && multicast_socket_->is_open()) {
 #if VSOMEIP_BOOST_VERSION >= 106600
-    #ifdef __linux__
-        udp_server_endpoint_impl_receive_op its_operation {
+        auto its_storage = std::make_shared<udp_endpoint_receive_op::storage>(
+            multicast_mutex_,
             *multicast_socket_,
             multicast_remote_,
             std::bind(
@@ -258,20 +258,9 @@ void udp_server_endpoint_impl::receive_multicast(uint8_t _multicast_id) {
             _multicast_id,
             is_v4_,
             boost::asio::ip::address(),
-            std::numeric_limits<size_t>::min()
-        };
-        multicast_socket_->async_wait(socket_type::wait_read, its_operation);
-    #else
-        multicast_socket_->async_receive_from(
-            boost::asio::buffer(&multicast_recv_buffer_[0], max_message_size_),
-            multicast_remote_,
-            [self = std::dynamic_pointer_cast<udp_server_endpoint_impl>(shared_from_this()),
-            multicast_id = _multicast_id, multicast_remote = multicast_remote_](boost::system::error_code ec, std::size_t length)
-            {            
-                self->on_multicast_received(ec, length, multicast_id, multicast_remote.address());
-            }
+            std::numeric_limits<std::size_t>::min()
         );
-    #endif
+        multicast_socket_->async_wait(socket_type::wait_read, udp_endpoint_receive_op::receive_cb(its_storage));
 #else
         multicast_socket_->async_receive_from(
             boost::asio::buffer(&multicast_recv_buffer_[0], max_message_size_),

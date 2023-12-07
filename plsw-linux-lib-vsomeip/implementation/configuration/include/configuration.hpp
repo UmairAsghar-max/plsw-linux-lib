@@ -309,8 +309,6 @@ public:
     virtual bool is_security_external() const = 0;
     virtual bool is_security_audit() const = 0;
     virtual bool is_remote_access_allowed() const = 0;
-    virtual bool add_service_instance(service_t service, instance_t instance) = 0;
-    virtual bool is_registered_service(service_t service, instance_t instance) = 0;
 };
 
 } // namespace vsomeip_v3
