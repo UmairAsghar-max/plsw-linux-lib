@@ -1,0 +1,53 @@
+name: Compile PLSW-LINUX-LIB-CAPICXX-SOMEIP-RUNTIME
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  compile_vsomeip:
+    runs-on: windows-latest
+    steps:
+    - name: Windows - Install boost 1.78.0
+      uses: MarkusJx/install-boost@v2.4.4
+      id: Boost
+      with:
+          boost_version: 1.78.0
+          platform: windows
+          boost_install_dir: C:\local
+          toolset: msvc
+          arch: x86
+          cache: true
+
+    - uses: actions/checkout@v3
+
+    - name: Build & Install PLSW-LINUX-LIB-CAPICXX-CORE-RUNTIME
+      run: |
+          cd plsw-linux-lib-capicxx-core-runtime
+          mkdir build
+          cd build
+          cmake ../
+          cmake --build . --config Release
+          cmake --install . --prefix "C:/local/capicxx-core-runtime"
+
+    - name: Build & Install PLSW-LINUX-LIB-VSOMEIP
+      run: |
+          cd plsw-linux-lib-vsomeip
+          mkdir build
+          cd build
+          cmake -DBOOST_ROOT=C:\local\boost\boost ../
+          cmake --build . --config Release
+          cmake --install . --prefix "C:/local/vsomeip"
+
+    - name: Build & Install PLSW-LINUX-LIB-CAPICXX-SOMEIP-RUNTIME
+      run: |
+          cd plsw-linux-lib-capicxx-someip-runtime
+          mkdir build
+          cd build
+          set vsomeip3_DIR=C:/local/vsomeip/CMake/
+          set CommonAPI_DIR=C:/local/capicxx-core-runtime/cmake/
+          cmake -DBOOST_ROOT=C:\local\boost\boost ../
+          cmake --build . --config Release
+          cmake --install . --prefix "C:/local/capicxx-core-runtime"
