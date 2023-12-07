@@ -10,17 +10,6 @@ jobs:
   compile_vsomeip:
     runs-on: windows-latest
     steps:
-    - name: Windows - Install boost 1.78.0
-      uses: MarkusJx/install-boost@v2.4.4
-      id: Boost
-      with:
-          boost_version: 1.78.0
-          platform: windows
-          boost_install_dir: C:\local
-          toolset: msvc
-          arch: x86
-          cache: true
-
     - uses: actions/checkout@v3
 
     - name: Build & Install PLSW-LINUX-LIB-CAPICXX-CORE-RUNTIME
@@ -31,6 +20,17 @@ jobs:
           cmake ../
           cmake --build . --config Release
           cmake --install . --prefix "C:/local/capicxx-core-runtime"
+
+    - name: Windows - Install boost 1.78.0
+      uses: MarkusJx/install-boost@v2.4.4
+      id: Boost
+      with:
+          boost_version: 1.78.0
+          platform: windows
+          boost_install_dir: C:\local
+          toolset: msvc
+          arch: x86
+          cache: true
 
     - name: Build & Install PLSW-LINUX-LIB-VSOMEIP
       run: |
